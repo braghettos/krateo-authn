@@ -70,3 +70,21 @@ jobs:
         uses: codecov/codecov-action@v4
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
+
+  crds-drift:
+    name: CRDs drift guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+      - name: Regenerate CRDs
+        run: make generate
+      - name: Fail on stale CRDs
+        run: |
+          if ! git diff --exit-code crds/; then
+            echo "::error::Committed CRDs in crds/ are stale. Run 'make generate' and commit the result." >&2
+            exit 1
+          fi
+          echo "CRDs are up to date."
