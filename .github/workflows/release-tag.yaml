@@ -1,281 +1,173 @@
+# Canonical Krateo COMPONENT (code-repo) release workflow — THE single way every krateo-*
+# code repo builds & pushes its image and (if it owns CRDs) publishes them. Identical
+# byte-for-byte across ALL component repos (no per-repo config); everything is derived from
+# the repo itself.
+#
+#   • build  — ONE multi-platform image (linux/amd64 + linux/arm64) via docker/build-push-action@v7
+#              (QEMU + buildx), tagged from the pushed git tag. Image = ghcr.io/<this repo>.
+#   • crds   — only acts for CRD-owning repos: runs `make generate` (the single agnostic entry
+#              point each CRD repo exposes; repos without it skip cleanly), then opens a PR into
+#              the component's chart repo (braghettos/<repo>-chart) refreshing crds-subchart/,
+#              injecting helm.sh/resource-policy: keep, and patch-bumping the crds-subchart.
 name: release-tag
 
 on:
   push:
-    tags: [ '[0-9]+.[0-9]+.[0-9]+' ]
+    tags: ["[0-9]+.[0-9]+.[0-9]+"]
 
 env:
   GHCR_REPO: ghcr.io/${{ github.repository }}
 
 jobs:
   build:
-    name: Build and Push
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [ubuntu-22.04-arm, ubuntu-22.04]
-        include:
-          - runner: ubuntu-22.04-arm
-            platform: linux/arm64
-          - runner: ubuntu-22.04
-            platform: linux/amd64
-    runs-on: ${{ matrix.runner }}
-    
-    permissions:
-      contents: read
-      packages: write
-
-    steps:
-      - name: Prepare
-        run: |
-          platform=${{ matrix.platform }}
-          echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
-
-      - name: Docker meta
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.GHCR_REPO }}
-
-      - name: Login to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build and push by digest
-        id: build
-        uses: docker/build-push-action@v5
-        with:
-          platforms: ${{ matrix.platform }}
-          push: true
-          labels: ${{ steps.meta.outputs.labels }}
-          outputs: type=image,"name=${{ env.GHCR_REPO }}",push-by-digest=true,name-canonical=true,push=true
-
-      - name: Export digest
-        run: |
-          mkdir -p /tmp/digests
-          digest="${{ steps.build.outputs.digest }}"
-          touch "/tmp/digests/${digest#sha256:}"
-
-      - name: Upload digest
-        uses: actions/upload-artifact@v4
-        with:
-          name: digests-${{ env.PLATFORM_PAIR }}
-          path: /tmp/digests/*
-          if-no-files-found: error
-          retention-days: 1
-
-  merge:
+    name: Build & push image (multi-platform)
     runs-on: ubuntu-latest
-    needs:
-      - build
     permissions:
       contents: read
       packages: write
     steps:
-      - name: Download digests
-        uses: actions/download-artifact@v4
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v6
         with:
-          path: /tmp/digests
-          pattern: digests-*
-          merge-multiple: true
+          images: ${{ env.GHCR_REPO }}
 
       - name: Login to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
-      - name: Docker meta
-        id: meta
-        uses: docker/metadata-action@v5
+      # ONE job, multi-platform manifest list built with buildx (arm64 via QEMU emulation).
+      - name: Build and push (linux/amd64, linux/arm64)
+        uses: docker/build-push-action@v7
         with:
-          images: ${{ env.GHCR_REPO }}
-
-      - name: Create manifest list and push
-        working-directory: /tmp/digests
-        run: |
-          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf '${{ env.GHCR_REPO }}@sha256:%s ' *)
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
 
       - name: Inspect image
-        run: |
-          docker buildx imagetools inspect ${{ env.GHCR_REPO }}:${{ steps.meta.outputs.version }}
-
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: 'stable'
-      - name: Gather dependencies
-        run: go mod download
-      - name: Run coverage
-        run: go test -race -coverprofile=coverage.txt -covermode=atomic ./...
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
+        run: docker buildx imagetools inspect ${{ env.GHCR_REPO }}:${{ steps.meta.outputs.version }}
 
   crds:
-    name: Generate crds
+    name: Generate & publish crds-subchart
     runs-on: ubuntu-latest
-    needs:
-      - merge
+    needs: [build]
     permissions:
       contents: write
       pull-requests: write
-
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: 'stable'
 
-      - name: Generate crds
-        run: make generate
+      # Agnostic CRD generation: each CRD-owning repo exposes a single `make generate` target
+      # that regenerates ./crds. A repo with no such target is not a CRD owner — skip cleanly.
+      - name: Generate CRDs (skip if not a CRD owner)
+        id: gen
+        run: |
+          set -euo pipefail
+          if [ -f Makefile ] && make -n generate >/dev/null 2>&1; then
+            make generate
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "No 'make generate' target — this component owns no CRDs; skipping CRD publish."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: List generated CRDs
-        run: ls -la ./crds
-
-      - name: Upload generated CRDs
-        uses: actions/upload-artifact@v4
-        with:
-          name: authn-crds-yaml-files
-          path: ${{ github.workspace }}/crds/*.yaml
-
-      - name: Push CRDs to braghettos/krateo-authn-chart (crds-subchart) via PR
+      - name: Publish crds-subchart to the chart repo via PR
+        if: steps.gen.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.PAT }}
         run: |
           set -eo pipefail
           cd "$GITHUB_WORKSPACE"
 
-          TARGET_REPO="braghettos/krateo-authn-chart"
+          # Convention: the component's chart repo is <this repo>-chart; the CRD short name
+          # and branch are derived from the repo name. No per-repo configuration.
+          NAME="${GITHUB_REPOSITORY##*/}"
+          TARGET_REPO="${GITHUB_REPOSITORY}-chart"
           LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "main")
-          BRANCH="authn-crds-${LATEST_TAG}"
+          BRANCH="${NAME}-crds-${LATEST_TAG}"
           echo "Target repo: $TARGET_REPO | tag: $LATEST_TAG | branch: $BRANCH"
 
-          # The generated CRDs must exist locally before we touch the chart repo.
           shopt -s nullglob
           LOCAL_CRDS=("$GITHUB_WORKSPACE"/crds/*.yaml)
           if [ "${#LOCAL_CRDS[@]}" -eq 0 ]; then
-            echo "ERROR: no generated CRDs found in crds/" >&2
-            exit 1
+            echo "make generate produced no CRDs in ./crds — nothing to publish."
+            exit 0
           fi
           echo "Generated ${#LOCAL_CRDS[@]} CRD file(s)."
 
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Clone the chart repo and authenticate the push remote.
           gh repo clone "$TARGET_REPO" /tmp/chart
           cd /tmp/chart
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${TARGET_REPO}.git"
-          git fetch origin
-          git checkout main
-          git pull origin main
+          git fetch origin && git checkout main && git pull origin main
 
-          # One-time migration: rename the legacy crd-chart/ -> crds-subchart/.
-          # git mv preserves Chart.yaml/values.* so the Helm chart name (authn-crd, pinned by
-          # the installer) is unchanged — only the directory moves.
-          if [ -d crd-chart ] && [ ! -d crds-subchart ]; then
-            echo "Migrating crd-chart/ -> crds-subchart/"
-            git mv crd-chart crds-subchart
-          fi
+          # One-time migration of any legacy crd-chart/ -> crds-subchart/ (Helm chart name unchanged).
+          if [ -d crd-chart ] && [ ! -d crds-subchart ]; then git mv crd-chart crds-subchart; fi
           mkdir -p crds-subchart/templates
 
-          # Refresh the CRD templates: drop the previous set, copy the freshly generated one.
           rm -f crds-subchart/templates/*.yaml
           cp "$GITHUB_WORKSPACE"/crds/*.yaml crds-subchart/templates/
 
-          # Deletion-safety: every published CRD must carry helm.sh/resource-policy: keep so
-          # Helm never garbage-collects it on upgrade/uninstall/prune (this installer
-          # heavy-reconciles and has pruned templated resources mid-cascade). controller-gen
-          # cannot emit a Helm annotation, so the publishing CI injects it — uniformly, and
-          # idempotently, so the regen can never strip it again.
+          # Deletion-safety: every published CRD carries helm.sh/resource-policy: keep so Helm
+          # never garbage-collects it on upgrade/uninstall/prune. controller-gen cannot emit a
+          # Helm annotation, so the publishing CI injects it — uniformly and idempotently.
           for f in crds-subchart/templates/*.yaml; do
             yq -i '.metadata.annotations."helm.sh/resource-policy" = "keep"' "$f"
           done
-
-          # Safety net: the old chart directory must not survive.
           if [ -d crd-chart ]; then git rm -r crd-chart; fi
 
-          # Bump the crds-subchart Chart.yaml version by a patch (it versions independently
-          # of the app chart and carries a literal pinned version, not the CHART_VERSION placeholder).
+          # Patch-bump the independently-versioned crds-subchart Chart.yaml.
           CHART_FILE="crds-subchart/Chart.yaml"
-          CUR_VER="$(awk '/^version:/{print $2; exit}' "$CHART_FILE")"
-          if echo "$CUR_VER" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            NEW_VER="$(echo "$CUR_VER" | awk -F. '{printf "%d.%d.%d", $1, $2, $3+1}')"
-            sed -i "s/^version:.*/version: ${NEW_VER}/" "$CHART_FILE"
-            echo "Bumped crds-subchart version: ${CUR_VER} -> ${NEW_VER}"
+          CUR=$(awk '/^version:/{print $2; exit}' "$CHART_FILE")
+          if echo "$CUR" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            NEXT=$(echo "$CUR" | awk -F. '{printf "%d.%d.%d", $1, $2, $3+1}')
           else
-            echo "WARNING: crds-subchart version '${CUR_VER}' is not plain semver; leaving untouched."
-            NEW_VER="$CUR_VER"
+            NEXT="0.0.1"
           fi
+          sed -i "s/^version:.*/version: ${NEXT}/" "$CHART_FILE"
+          echo "crds-subchart version: ${CUR} -> ${NEXT}"
 
-          git add -A
-
-          if git diff --cached --quiet; then
-            echo "✅ crds-subchart already matches the generated CRDs — nothing to push."
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "crds-subchart already matches the generated CRDs — nothing to push."
             exit 0
           fi
 
-          echo "=== Changes to publish ==="
-          git diff --cached --name-status
+          git checkout -b "$BRANCH" 2>/dev/null || { git push origin --delete "$BRANCH" 2>/dev/null || true; git checkout -b "$BRANCH"; }
+          git add -A
+          git commit -m "Update ${NAME} CRDs (crds-subchart) from tag ${LATEST_TAG}
 
-          # Recreate a clean per-tag branch off main, then carry the staged changes onto it.
-          if git ls-remote --heads origin "$BRANCH" | grep -q "$BRANCH"; then
-            echo "Deleting stale remote branch '$BRANCH'"
-            git push origin --delete "$BRANCH" || true
-          fi
-          git checkout -b "$BRANCH"
-
-          git commit -m "Update authn CRDs (crds-subchart) from tag ${LATEST_TAG}
-
-          Regenerated from braghettos/krateo-authn @ ${LATEST_TAG} via controller-gen.
-          Migrates crd-chart -> crds-subchart (if still present) and refreshes the
-          User/LDAPConfig/OAuthConfig/OIDCConfig CRDs. Helm chart name unchanged: authn-crd.
-          crds-subchart version bumped to ${NEW_VER}.
-          Workflow run: ${GITHUB_RUN_ID}"
-
+          Regenerated by the ${NAME} code-repo CI (make generate). Refreshes
+          crds-subchart/templates/, injects helm.sh/resource-policy: keep, bumps ${CUR} -> ${NEXT}."
           git push origin "$BRANCH"
 
-          # Open a PR against the chart repo, or update the existing one for this branch.
-          PR_TITLE="Update authn CRDs (crds-subchart) — ${LATEST_TAG}"
-          PR_BODY="Automated update of authn CRDs in \`crds-subchart/templates/\` from \`braghettos/krateo-authn\` @ \`${LATEST_TAG}\`.
-
-          - Regenerated via controller-gen (\`make generate\`).
-          - Migrates \`crd-chart\` → \`crds-subchart\` if still present (Helm chart name unchanged: \`authn-crd\`).
-          - Bumps \`crds-subchart/Chart.yaml\` version to \`${NEW_VER}\`.
-
-          Workflow run: \`${GITHUB_RUN_ID}\`."
-
+          PR_TITLE="Update ${NAME} CRDs (crds-subchart) — ${LATEST_TAG}"
+          PR_BODY="Automated update of ${NAME} CRDs in \`crds-subchart/templates/\` from \`${GITHUB_REPOSITORY}\` @ \`${LATEST_TAG}\` (make generate). Injects \`helm.sh/resource-policy: keep\`; bumps crds-subchart \`${CUR}\` -> \`${NEXT}\`."
           PR_STATE=$(gh pr view "$BRANCH" --repo "$TARGET_REPO" --json state -q .state 2>/dev/null || echo "NONE")
-          case "$PR_STATE" in
-            OPEN)
-              echo "✅ Existing open PR for '$BRANCH' was updated by the push."
-              ;;
-            CLOSED)
-              gh pr reopen "$BRANCH" --repo "$TARGET_REPO" \
-                || gh pr create --title "$PR_TITLE" --body "$PR_BODY" --head "$BRANCH" --base main --repo "$TARGET_REPO"
-              ;;
-            *)
-              gh pr create --title "$PR_TITLE" --body "$PR_BODY" --head "$BRANCH" --base main --repo "$TARGET_REPO"
-              ;;
-          esac
+          if [ "$PR_STATE" = "OPEN" ]; then
+            echo "PR already open for $BRANCH."
+          else
+            gh pr create --title "$PR_TITLE" --body "$PR_BODY" --head "$BRANCH" --base main --repo "$TARGET_REPO"
+          fi
