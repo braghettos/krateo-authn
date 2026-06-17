@@ -1,0 +1,40 @@
+# authn (code repo) — LLM doc index
+
+> authn is the Krateo authentication service: a small stateless Go HTTP server that turns a
+> successful login (basic / LDAP / OAuth2 / OIDC) into a short-lived, per-user **client-cert
+> kubeconfig** (minted via the Kubernetes CSR API) plus an optional JWT, and lists the
+> login strategies the frontend should render. This index is the agent entry point to the
+> **internals & runtime** view. The **deployment, CRD and wiring** view lives in the chart repo
+> `braghettos/krateo-authn-chart` `docs/`.
+
+## How to use this index (agents)
+
+You are reading the docs for a SPECIFIC deployed version. Fetch every file below **at the tag that
+matches the running build**, not `main`:
+- image version = the authn Deployment's container image tag (→ THIS repo's tag, == the chart `appVersion`);
+- chart version = `CompositionDefinition.spec.chart.version` for authn (→ the `krateo-authn-chart` repo tag).
+
+Read this repo's docs at the **image-version** tag. If something isn't in the docs, read the source
+at that same tag — don't guess, and don't trust `main` for a deployed older version.
+
+## Start here
+
+- [docs/architecture.md](architecture.md): how the service is built — `main.go` boot, the route
+  table, the `Route` interface, the kubeconfig generator, and the four auth packages. Read first.
+- [docs/behavior.md](behavior.md): the HTTP endpoints it serves, the four CRDs it reads, the
+  login/response contract, and its integration contracts (snowplow RESTAction, Kubernetes CSR).
+- [docs/gotchas.md](gotchas.md): real runtime pitfalls grounded in the code/config.
+
+## Reference (source of truth)
+
+- `main.go` — server wiring: flags/env, route registration, CORS, graceful shutdown.
+- `apis/authn/*/v1alpha1/types.go` + `apis/authn/oauth/types.go` — the Go types behind the four CRDs.
+- `crds/*.yaml` — the generated CRD manifests this repo owns.
+- `internal/routes/` — the `Route` interface and every endpoint handler.
+- `README.md` — product-facing overview and `curl` examples.
+
+## Companion doc set
+
+The deployment + CRD + wiring view is versioned independently in
+`braghettos/krateo-authn-chart` `docs/` (read it at the **chart-version** tag). Each set
+cross-links the other; each is versioned in its own repo.
