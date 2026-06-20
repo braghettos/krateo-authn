@@ -114,17 +114,48 @@ The exchange must be **strictly bounded** — it issues platform identities:
 authn's own SA gains one permission: `create` on
 `tokenreviews.authentication.k8s.io`.
 
-### Mapping policy — shape (open, §6)
+### Mapping policy — shape
 
-A declarative mapping from SA → service identity, e.g. a cluster-scoped CR or a config:
+**It is the existing `basic.User` pattern, with the credential swapped from a password to a
+SA token.** Every strategy already has its own per-group CRD (`basic.authn.krateo.io` →
+`User`, `oauth.authn.krateo.io` → config, …); the `serviceaccount` strategy gets the same:
+a **`ServiceAccount` CRD in `serviceaccount.authn.krateo.io`**, structurally identical to
+`basic.User` (`apis/authn/basic/v1alpha1/types.go`) except `serviceAccountRef` replaces
+`passwordRef`.
+
+```go
+// apis/authn/serviceaccount/v1alpha1/types.go — group serviceaccount.authn.krateo.io
+type ServiceAccountSpec struct {
+    // The k8s SA allowed to exchange its token for this identity — the credential,
+    // analogous to basic.User.passwordRef but verified via TokenReview, not a compare.
+    ServiceAccountRef *core.ServiceAccountSelector `json:"serviceAccountRef"` // {namespace,name}
+    // Groups the service identity belongs to → issued clientconfig cert O= (certs.go:42)
+    // → standard Kubernetes RBAC.
+    Groups []string `json:"groups,omitempty"`
+    // +optional DisplayName, TokenTTL, Audiences
+}
+// +kubebuilder:resource:scope=Namespaced,categories={krateo,authn,serviceaccount}
+// metadata.name == the issued username (exactly like basic.User).
+```
 
 ```yaml
-# illustrative
-serviceAccount: { namespace: krateo-system, name: composition-dynamic-controller }
-mapsTo:
-  username: svc:composition-dynamic-controller
-  groups:   [ "krateo:services", "composition-status" ]   # → drives the clientconfig RBAC
+apiVersion: serviceaccount.authn.krateo.io/v1alpha1
+kind: ServiceAccount
+metadata: { name: composition-dynamic-controller, namespace: krateo-system }  # name == username
+spec:
+  serviceAccountRef: { namespace: krateo-system, name: composition-dynamic-controller }
+  groups: [ "krateo:services" ]            # → cert O= → k8s RBAC scoping
 ```
+
+Consequences (all inherited from the existing model):
+
+- **The CR's existence is the allowlist** — no `ServiceAccount` CR ⇒ no exchange; authoring
+  them is gated by RBAC on the CRD (cluster admins).
+- **RBAC scoping is standard Kubernetes, not authn's job.** authn mints a client cert
+  `CN=<name>, O=<groups>` exactly as for users; you bound a service by binding a `ClusterRole`
+  to its **group** via a normal `ClusterRoleBinding`. authn never authors RBAC.
+- **Zero new concepts** — anyone who knows `basic.User` knows this; the only new field is
+  `serviceAccountRef`, and TokenReview replaces the password compare.
 
 ---
 
@@ -143,9 +174,9 @@ mapsTo:
 
 ## 6. Open questions
 
-- **Mapping policy home & shape** — a dedicated CRD (e.g. `ServiceAccountBinding`) vs. a
-  ConfigMap; how it maps SA → username/groups, and how the resulting `clientconfig` RBAC is
-  expressed/provisioned.
+- ~~Mapping policy home & shape~~ — **resolved (§4):** a `ServiceAccount` CRD in
+  `serviceaccount.authn.krateo.io`, the `basic.User` pattern with `serviceAccountRef`
+  instead of `passwordRef`; RBAC stays standard k8s bound to `spec.groups`.
 - **Token audience & naming** — the canonical audience string and service-username scheme
   (`svc:<name>`?), and group conventions.
 - **JWT lifetime & caching** — issued-token TTL vs. caller cache window; revocation story.
