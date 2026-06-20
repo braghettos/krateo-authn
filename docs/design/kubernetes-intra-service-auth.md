@@ -180,10 +180,15 @@ Consequences (all inherited from the existing model):
 - **Token audience & naming** — the canonical audience string and service-username scheme
   (`svc:<name>`?), and group conventions.
 - **JWT lifetime & caching** — issued-token TTL vs. caller cache window; revocation story.
-- **Multi-cluster** — `TokenReview` is cluster-local. A service running in a **remote target
-  cluster** authenticating to authn on the management cluster needs either authn to validate
-  against the target's apiserver, or an authn presence per cluster. (Mirrors the
-  composition-status multi-cluster `apiRef` placement question.)
+- **Multi-cluster — `TokenReview` is cluster-local** (it validates against the apiserver
+  that *issued* the token). A service in a **remote target** cannot be authenticated by
+  mgmt-authn directly. Direction (mirrors composition-status, which resolves this by making
+  resolution cluster-local): **prefer authn target-local** in the remote case — auth runs
+  where the service runs, validating the local token — paired with target-local resolution.
+  **Fallback:** extend mgmt-authn to `TokenReview` against a **registered target's
+  apiserver** using the client core-provider already holds (the `KubernetesTarget` Secret) —
+  reuses existing plumbing but couples authn to the target registry and keeps custody
+  central. Local-cluster services (the common case) are unaffected.
 - **Endpoint path/verb** — `/serviceaccount/login` (POST) vs. a token-exchange-style
   `/token` (RFC 8693 framing).
 - **Bootstrap ordering** — authn must be reachable before dependent controllers can resolve
