@@ -22,6 +22,7 @@ import (
 	"github.com/krateoplatformops/authn/internal/routes/auth/ldap"
 	"github.com/krateoplatformops/authn/internal/routes/auth/oauth"
 	"github.com/krateoplatformops/authn/internal/routes/auth/oidc"
+	"github.com/krateoplatformops/authn/internal/routes/auth/serviceaccount"
 	"github.com/krateoplatformops/authn/internal/routes/auth/strategies"
 	"github.com/krateoplatformops/authn/internal/routes/health"
 	xcontext "github.com/krateoplatformops/plumbing/context"
@@ -70,6 +71,9 @@ func main() {
 	authnUsername := flag.String("authn-username",
 		env.String("AUTHN_USERNAME", "authn"), "authn username for clientconfig for restaction api calls")
 	signKey := flag.String("jwt-sign-key", env.String("JWT_SIGN_KEY", ""), "secret key used to sign JWT tokens")
+	serviceAccountAudience := flag.String("serviceaccount-audience",
+		env.String("AUTHN_SERVICEACCOUNT_AUDIENCE", serviceaccount.DefaultAudience),
+		"audience the projected ServiceAccount token must carry for the /serviceaccount/login strategy")
 
 	flag.Usage = func() {
 		fmt.Fprintln(flag.CommandLine.Output(), "Flags:")
@@ -147,6 +151,15 @@ func main() {
 		KubeconfigGenerator: gen,
 		JwtDuration:         *certExpiresIn,
 		JwtSingKey:          *signKey,
+	}))
+
+	// Kubernetes intra-service auth: backend services exchange their own (audience-bound)
+	// ServiceAccount token (validated via TokenReview) for an authn JWT + clientconfig.
+	all = append(all, serviceaccount.Login(cfg, serviceaccount.LoginOptions{
+		KubeconfigGenerator: gen,
+		JwtDuration:         *certExpiresIn,
+		JwtSingKey:          *signKey,
+		Audience:            *serviceAccountAudience,
 	}))
 
 	all = append(all, ldap.Login(cfg, ldap.LoginOptions{

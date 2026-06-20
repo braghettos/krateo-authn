@@ -13,6 +13,10 @@ rules:
   resources: ["signers"]
   resourceNames: ["kubernetes.io/kube-apiserver-client"]
   verbs: ["approve"]
+# Kubernetes intra-service auth (/serviceaccount/login): validate caller SA tokens.
+- apiGroups: ["authentication.k8s.io"]
+  resources: ["tokenreviews"]
+  verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
