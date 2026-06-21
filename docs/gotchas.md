@@ -10,7 +10,7 @@ hitting a registered path with the wrong verb returns `405` with an `Allow` head
 
 ## `/list` is defined but not served
 `internal/routes/list.go` implements a `/list` route, but it is **not** appended to the route table
-in `main.go`. Don't document or rely on `/list` as a live endpoint at this tag — only the seven
+in `main.go`. Don't document or rely on `/list` as a live endpoint at this tag — only the eight
 routes wired in `main.go:137-189` are served.
 
 ## CSR RBAC is mandatory — and broad
@@ -25,6 +25,28 @@ ServiceAccount/namespace, or approval silently 403s.
 If a CSR with the computed name already exists, the generator **deletes and recreates** it
 (`config/gen.go:41-55`) rather than reusing the prior cert. Repeated logins for the same user churn
 CSR objects; concurrent logins for the same user can race on that delete/recreate.
+
+## Intra-service auth needs `create tokenreviews` RBAC
+`/serviceaccount/login` validates the caller's SA token by creating a `TokenReview`
+(`serviceaccount/login.go:124-138`). authn's ServiceAccount must be granted `create` on
+`tokenreviews.authentication.k8s.io` — this is **separate** from the CSR RBAC above. Without it
+every intra-service login fails at the TokenReview call (returned to the caller as `403`).
+
+## Intra-service SA tokens must be audience-bound
+The strategy submits the TokenReview with the configured audience (default `authn`,
+`--serviceaccount-audience` / `AUTHN_SERVICEACCOUNT_AUDIENCE`) and rejects the token unless that
+audience is echoed back in `status.audiences` (`serviceaccount/login.go:134-136`). A plain
+default-audience SA Secret or a token minted for the kube-apiserver / another service will **not**
+authenticate — callers must mount a **projected** token (`TokenRequest`) bound to authn's audience.
+
+## Unmapped ServiceAccounts are rejected — and the mapping must live in the operator namespace
+A TokenReview-authenticated SA still only exchanges if a `serviceaccount.authn.krateo.io/ServiceAccount`
+CR's `spec.serviceAccountRef` matches it; the CR's existence **is** the allowlist, and no match → `403`
+(`resolvers.ServiceAccountForSA`). Two further traps: (1) authn looks the mapping up **only in its own
+operator namespace** (`util.GetOperatorNamespace()`), so a mapping created elsewhere is invisible and the
+exchange is rejected; (2) if two mappings reference the same SA, the lookup is **ambiguous and errors out**
+rather than picking one. Note `metadata.name` is the issued *username* and need not equal the SA name, so
+the mapping is matched by ref, not by name.
 
 ## LDAP TLS skips verification
 With `spec.tls: true`, the LDAP `StartTLS` call uses `InsecureSkipVerify: true`

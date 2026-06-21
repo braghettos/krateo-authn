@@ -1,9 +1,10 @@
 # authn (code repo) — LLM doc index
 
 > authn is the Krateo authentication service: a small stateless Go HTTP server that turns a
-> successful login (basic / LDAP / OAuth2 / OIDC) into a short-lived, per-user **client-cert
-> kubeconfig** (minted via the Kubernetes CSR API) plus an optional JWT, and lists the
-> login strategies the frontend should render. This index is the agent entry point to the
+> successful login (basic / LDAP / OAuth2 / OIDC, plus **serviceaccount** for Kubernetes
+> intra-service auth) into a short-lived, per-user **client-cert kubeconfig** (minted via the
+> Kubernetes CSR API) plus an optional JWT, and lists the login strategies the frontend should
+> render. This index is the agent entry point to the
 > **internals & runtime** view. The **deployment, CRD and wiring** view lives in the chart repo
 > `braghettos/krateo-authn-chart` `docs/`.
 
@@ -28,9 +29,18 @@ at that same tag — don't guess, and don't trust `main` for a deployed older ve
 ## Reference (source of truth)
 
 - `main.go` — server wiring: flags/env, route registration, CORS, graceful shutdown.
-- `apis/authn/*/v1alpha1/types.go` + `apis/authn/oauth/types.go` — the Go types behind the four CRDs.
+- `apis/authn/*/v1alpha1/types.go` + `apis/authn/oauth/types.go` — the Go types behind the five CRDs
+  (`User`, `ServiceAccount`, `LDAPConfig`, `OIDCConfig`, `OAuthConfig`).
 - `crds/*.yaml` — the generated CRD manifests this repo owns.
 - `internal/routes/` — the `Route` interface and every endpoint handler.
+- `internal/routes/auth/serviceaccount/login.go` — `POST /serviceaccount/login`: Kubernetes
+  intra-service auth — validates a projected SA token via the `TokenReview` API (audience-bound,
+  `--serviceaccount-audience`, default `authn`), maps it to a `serviceaccount.authn.krateo.io/ServiceAccount`
+  allowlist CR, then issues the standard kubeconfig + JWT. Needs `create tokenreviews` RBAC.
+- `apis/authn/serviceaccount/v1alpha1/types.go` — the `ServiceAccount` mapping CRD (exchange allowlist:
+  `serviceAccountRef {namespace,name}`, `groups[]` → cert `O=`, `displayName`).
+- `internal/helpers/kube/resolvers/serviceaccount.go` — resolves the `ServiceAccount` mapping for an
+  authenticated SA by listing the operator namespace and matching `serviceAccountRef` (the allowlist).
 - `README.md` — product-facing overview and `curl` examples.
 
 ## Companion doc set

@@ -178,7 +178,9 @@ Consequences (all inherited from the existing model):
   `serviceaccount.authn.krateo.io`, the `basic.User` pattern with `serviceAccountRef`
   instead of `passwordRef`; RBAC stays standard k8s bound to `spec.groups`.
 - **Token audience & naming** — the canonical audience string and service-username scheme
-  (`svc:<name>`?), and group conventions.
+  (`svc:<name>`?). _Group convention — **resolved** by the composition-dynamic-controller
+  integration: the per-composition group is `krateo:cdc:<resource>-<apiVersion>` (core-provider
+  auto-provisions a `ServiceAccount` mapping carrying that group)._
 - **JWT lifetime & caching** — issued-token TTL vs. caller cache window; revocation story.
 - **Multi-cluster — `TokenReview` is cluster-local** (it validates against the apiserver
   that *issued* the token). A service in a **remote target** cannot be authenticated by
