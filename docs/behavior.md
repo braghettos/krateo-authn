@@ -14,6 +14,7 @@ Every route is registered in `main.go:137-189` and implements `routes.Route`.
 | GET    | `/info`         | Fetch a stored `AuthInfo` by `?name=` | `internal/routes/auth/info/info.go` |
 | GET    | `/health`       | Liveness/readiness; returns `{name,version}` once healthy, else `503` | `internal/routes/health/health.go` |
 | GET    | `/basic/login`  | HTTP Basic login → kubeconfig (+JWT) | `internal/routes/auth/basic/login.go` |
+| POST   | `/serviceaccount/login` | Kubernetes intra-service auth: SA token (TokenReview) → kubeconfig (+JWT) | `internal/routes/auth/serviceaccount/login.go` |
 | POST   | `/ldap/login`   | LDAP login (JSON body) → kubeconfig (+JWT) | `internal/routes/auth/ldap/login.go` |
 | GET    | `/oauth/login`  | OAuth2 code exchange → kubeconfig (+JWT) | `internal/routes/auth/oauth/login.go` |
 | GET    | `/oidc/login`   | OIDC code exchange → kubeconfig (+JWT) | `internal/routes/auth/oidc/login.go` |
@@ -32,7 +33,7 @@ Returns a JSON array of `{kind, name?, graphics?, path, extensions?}` (`strategi
 
 ### The login response contract
 
-All four login routes converge on `encode.Success` (`encode/success.go:18-53`) and return:
+All five login routes converge on `encode.Success` (`encode/success.go:18-53`) and return:
 
 ```json
 {
@@ -54,6 +55,19 @@ All four login routes converge on `encode.Success` (`encode/success.go:18-53`) a
 - **basic** — HTTP `Authorization: Basic` header; `401` with `WWW-Authenticate` if absent
   (`basic/login.go:65-70`). Password compared in plaintext against the Secret keyed by
   `User.spec.passwordRef` (`basic/login.go:107-124`).
+- **serviceaccount** — HTTP `Authorization: Bearer <projected SA token>`; `401` with
+  `WWW-Authenticate: Bearer` if absent (`serviceaccount/login.go:75-80`). The token is validated via
+  the Kubernetes `TokenReview` API: authn submits it with the expected audience (default `authn`,
+  `--serviceaccount-audience` / `AUTHN_SERVICEACCOUNT_AUDIENCE`) and requires
+  `status.authenticated == true` **and** the audience to be echoed back
+  (`serviceaccount/login.go:124-136`). It then parses the authenticated
+  `system:serviceaccount:<ns>:<name>` username and looks up a `ServiceAccount` mapping whose
+  `spec.serviceAccountRef` matches that SA, **in the authn operator namespace**
+  (`resolvers.ServiceAccountForSA`). No mapping → `403` (the allowlist); an SA matched by more than
+  one mapping → error (ambiguous). On success authn issues the standard kubeconfig + JWT with
+  username = the mapping's `metadata.name`, groups = `spec.groups`, and `displayName` from the
+  mapping. Any TokenReview/validation/mapping failure returns `403` (`encode.Forbidden`,
+  `serviceaccount/login.go:84-87`).
 - **ldap** — `?name=<LDAPConfig>` + JSON body `{"username","password"}` (`ldap/login.go:73-130`).
   Error mapping: not-found → `404`, multiple entries → `300`, other → `403`
   (`ldap/login.go:102-109`).
@@ -67,12 +81,25 @@ All four login routes converge on `encode.Success` (`encode/success.go:18-53`) a
 
 ## CRDs it reads
 
-authn owns four namespaced CRDs (group `*.authn.krateo.io`, version `v1alpha1`), rendered under
+authn owns five namespaced CRDs (group `*.authn.krateo.io`, version `v1alpha1`), rendered under
 `crds/`. It only **reads** them at request time — there is no controller that writes status.
 
 ### `User` (`basic.authn.krateo.io`) — `apis/authn/basic/v1alpha1/types.go`
 - `spec.passwordRef` (`SecretKeySelector`, required) — Secret holding the password.
 - `spec.displayName`, `spec.avatarURL`, `spec.groups[]`.
+
+### `ServiceAccount` (`serviceaccount.authn.krateo.io`) — `apis/authn/serviceaccount/v1alpha1/types.go`
+The intra-service-auth exchange allowlist; `metadata.name` is the issued username (like `User`).
+- `spec.serviceAccountRef` (`ObjectRef {namespace,name}`, required) — the Kubernetes ServiceAccount
+  allowed to exchange its (audience-bound) token for this identity. The CR's existence is the
+  allowlist: an SA with no matching CR cannot exchange.
+- `spec.groups[]` (optional) — become the issued cert's `O=`, so standard Kubernetes RBAC bound to
+  these groups scopes the identity; authn never authors RBAC.
+- `spec.displayName` (optional).
+
+  authn looks these up by **listing the operator namespace** and matching `serviceAccountRef`
+  (`resolvers.ServiceAccountForSA`), not by name — a mapping's name is the issued username and need
+  not equal the SA name.
 
 ### `LDAPConfig` (`ldap.authn.krateo.io`) — `apis/authn/ldap/v1alpha1/types.go`
 - `spec.dialURL` (required), `spec.baseDN` (required).
@@ -102,6 +129,14 @@ On every successful login the generator creates a `CertificateSigningRequest` wi
 `certs.go:171-173`). This requires the broad CSR RBAC in `manifests/rbac.csr.yaml` (create / get /
 list / watch / approve / delete / update on `certificatesigningrequests`, plus `approve` on the
 signer). The minted cert's CN = username and O = groups become the caller's Kubernetes identity.
+
+### Kubernetes TokenReview API (intra-service auth)
+The `/serviceaccount/login` strategy validates the caller's projected ServiceAccount token by
+creating a `TokenReview` (`authentication.k8s.io`) with the expected audience and reading back
+`status.authenticated` / `status.user.username` / `status.audiences`
+(`serviceaccount/login.go:124-138`). This requires authn's ServiceAccount to be granted `create` on
+`tokenreviews.authentication.k8s.io` (in addition to the CSR RBAC above); without it every
+intra-service login fails at the TokenReview call.
 
 ### snowplow (identity enrichment)
 When an `OIDCConfig`/`OAuthConfig` has a `restActionRef`, authn enriches the identity by calling

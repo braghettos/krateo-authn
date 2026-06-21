@@ -248,6 +248,45 @@ To obtain groups, add a custom mapper of type "Group Membership" and give it the
 To obtain the user avatar/profile image, go to the realm settings, then "User profiles" tab, "Create Attribute", and add one with the name `picture`. Set the profile picture for the user to a URL pointing to a picture. Keycloak will now return the avatar during authentication.
 
 
+### Login with a Kubernetes ServiceAccount (intra-service auth)
+
+> This strategy is for **backend services**, not human users. It lets an in-cluster Krateo service
+> authenticate to authn with its **own** Kubernetes ServiceAccount token (no password, no browser
+> redirect) and receive the same JWT + kubeconfig the other strategies return. It is not listed by
+> `GET /strategies` (there is no login button for it).
+
+The caller mounts a **projected** ServiceAccount token (`TokenRequest`, audience `authn`, short TTL)
+and presents it as a Bearer credential:
+
+```sh
+$ curl -X POST "https://api.krateoplatformops.io/authn/serviceaccount/login" \
+   -H "Authorization: Bearer $(cat /var/run/secrets/tokens/authn-token)"
+```
+
+authn validates the token via the Kubernetes **`TokenReview`** API (checking the expected audience —
+default `authn`, configurable with `--serviceaccount-audience`), then looks up a `ServiceAccount`
+mapping whose `serviceAccountRef` matches the caller's SA. The mapping is the **allowlist**: an SA
+with no matching `ServiceAccount` resource is rejected. The issued identity's username is the
+mapping's `metadata.name` and its groups are `spec.groups` (which become the client certificate's
+`O=`, scoped by standard Kubernetes RBAC).
+
+```yaml
+apiVersion: serviceaccount.authn.krateo.io/v1alpha1
+kind: ServiceAccount
+metadata:
+  name: composition-dynamic-controller   # == the issued username
+  namespace: krateo-system               # the authn operator namespace
+spec:
+  serviceAccountRef:                      # the k8s SA allowed to exchange its token
+    namespace: krateo-system
+    name: composition-dynamic-controller
+  groups: [ "krateo:services" ]           # → issued cert O= → standard k8s RBAC
+  displayName: Composition Dynamic Controller
+```
+
+> authn's ServiceAccount must be allowed to `create` `tokenreviews.authentication.k8s.io`, and the
+> `ServiceAccount` mapping must live in the authn operator namespace.
+
 ## RESTAction Configuration
 The `RESTActionRef` field in the OAuth2 and OIDC configs is mandatory and optional, respectively. It is used to compile the following fields, used to build the Kubernetes certificate required for authentication:
 - `name`: string

@@ -24,7 +24,7 @@ through the Kubernetes CSR API.
 4. **Kubeconfig generator.** `kubeconfig.NewGenerator(cfg, …)` (`main.go:128-133`) — the shared
    component every login route uses to mint a per-user kubeconfig.
 5. **Route table.** A `[]routes.Route` is assembled (`main.go:137-189`): `strategies`, `info`,
-   `health`, and the four login routes (`basic`, `ldap`, `oauth`, `oidc`).
+   `health`, and the five login routes (`basic`, `serviceaccount`, `ldap`, `oauth`, `oidc`).
 6. **Service JWT.** A 1-year JWT for the `authn` service identity is minted up front
    (`jwtutil.CreateToken`, `main.go:153-161`) and injected into the context the `oauth`/`oidc`
    routes use to call snowplow (`main.go:170-189`).
@@ -54,11 +54,23 @@ resolves its CRD, and writes JSON through `internal/helpers/encode`.
 
 ## The auth packages — `internal/routes/auth/*`
 
-Four login strategies, one package each, all returning a `routes.Route`:
+Five login strategies, one package each, all returning a `routes.Route`:
 
 - **basic** (`internal/routes/auth/basic/login.go`): `GET /basic/login`. Reads HTTP Basic creds
   (`login.go:65`), looks up a `User` CR, compares the password against the referenced Secret
   (`validate`, `login.go:107-132`).
+- **serviceaccount** (`internal/routes/auth/serviceaccount/login.go`): `POST /serviceaccount/login`.
+  Kubernetes intra-service auth — a backend service authenticates with its **own** projected
+  ServiceAccount token instead of a human credential. It reads the `Authorization: Bearer` token
+  (`bearerToken`, `login.go:155`), validates it through the Kubernetes **`TokenReview` API**
+  (`authentication.k8s.io`) with the expected audience (default `authn`, `--serviceaccount-audience`)
+  (`validate`, `login.go:112-153`), parses the authenticated `system:serviceaccount:<ns>:<name>`
+  username (`parseServiceAccountUsername`, `login.go:175`), then resolves a `ServiceAccount` mapping whose `serviceAccountRef`
+  matches — the mapping is the **exchange allowlist**, an unmatched SA is rejected
+  (`resolvers.ServiceAccountForSA`, `internal/helpers/kube/resolvers/serviceaccount.go`). On a hit it
+  issues the SAME JWT + clientconfig as the other strategies, with username = the mapping's
+  `metadata.name` and groups = the mapping's `spec.groups`. Not surfaced by `/strategies` (it has no
+  CRD-driven login button — it is machine-to-machine).
 - **ldap** (`internal/routes/auth/ldap/login.go`): `POST /ldap/login`. JSON body
   `{username,password}` (`login.go:127-130`); binds + searches the LDAP server
   (`support.go doLogin`).
@@ -102,10 +114,13 @@ file download when the basic route is called with `?d` (`basic/login.go:94-97`).
 
 ## API types & CRDs — `apis/`
 
-Four CRD groups under `authn.krateo.io` (`apis/authn/*`), each with a `v1alpha1` package and
+Five CRD groups under `authn.krateo.io` (`apis/authn/*`), each with a `v1alpha1` package and
 generated `zz_generated.deepcopy.go`:
 
 - `basic.authn.krateo.io` → `User` (`apis/authn/basic/v1alpha1/types.go`)
+- `serviceaccount.authn.krateo.io` → `ServiceAccount` (`apis/authn/serviceaccount/v1alpha1/types.go`)
+  — the intra-service-auth exchange allowlist: `serviceAccountRef {namespace,name}` (the k8s SA
+  allowed to exchange), `groups[]` (→ issued cert `O=` → k8s RBAC), `displayName`.
 - `ldap.authn.krateo.io` → `LDAPConfig` (`apis/authn/ldap/v1alpha1/types.go`)
 - `oidc.authn.krateo.io` → `OIDCConfig` (`apis/authn/oidc/v1alpha1/types.go`)
 - `oauth.authn.krateo.io` → `OAuthConfig` (`apis/authn/oauth/types.go`)
