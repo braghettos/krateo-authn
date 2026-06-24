@@ -14,6 +14,7 @@ import (
 	oidcv1alpha1 "github.com/krateoplatformops/authn/apis/authn/oidc/v1alpha1"
 	"github.com/krateoplatformops/authn/internal/helpers/kube/client"
 	"github.com/krateoplatformops/authn/internal/helpers/kube/util"
+	"github.com/krateoplatformops/authn/internal/telemetry"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/rest"
 )
@@ -24,7 +25,7 @@ type DiscoveryEndpointResponse struct {
 	Userinfo_endpoint      string `json:"userinfo_endpoint"`
 }
 
-func OIDCConfigGet(rc *rest.Config, name string) (*oidcv1alpha1.OIDCConfig, error) {
+func OIDCConfigGet(ctx context.Context, rc *rest.Config, name string) (*oidcv1alpha1.OIDCConfig, error) {
 	ns, err := util.GetOperatorNamespace()
 	if err != nil {
 		return nil, fmt.Errorf("unable to resolve service namespace: %w", err)
@@ -45,7 +46,7 @@ func OIDCConfigGet(rc *rest.Config, name string) (*oidcv1alpha1.OIDCConfig, erro
 		Into(res)
 
 	if (res.Spec.AuthorizationURL == "" || res.Spec.TokenURL == "" || res.Spec.UserInfoURL == "") && res.Spec.DiscoveryURL != "" {
-		err = doDiscovery(res)
+		err = doDiscovery(ctx, res)
 	} else if res.Spec.AuthorizationURL != "" && !strings.Contains(res.Spec.AuthorizationURL, "?") {
 		res.Spec.AuthorizationURL = authCodeURL(res)
 	}
@@ -75,7 +76,7 @@ func OIDCConfigList(rc *rest.Config) (*oidcv1alpha1.OIDCConfigList, error) {
 
 	for i, item := range res.Items {
 		if (item.Spec.AuthorizationURL == "" || item.Spec.TokenURL == "" || item.Spec.UserInfoURL == "") && item.Spec.DiscoveryURL != "" {
-			err = doDiscovery(&item)
+			err = doDiscovery(context.Background(), &item)
 			res.Items[i].Spec.AuthorizationURL = item.Spec.AuthorizationURL
 			res.Items[i].Spec.TokenURL = item.Spec.TokenURL
 			res.Items[i].Spec.UserInfoURL = item.Spec.UserInfoURL
@@ -87,14 +88,14 @@ func OIDCConfigList(rc *rest.Config) (*oidcv1alpha1.OIDCConfigList, error) {
 	return res, err
 }
 
-func doDiscovery(cfg *oidcv1alpha1.OIDCConfig) error {
+func doDiscovery(ctx context.Context, cfg *oidcv1alpha1.OIDCConfig) error {
 	// Use the discovery API to find the TokenURL and UserInfoURL, if present
 	if cfg.Spec.DiscoveryURL != "" {
-		request, err := http.NewRequest(http.MethodGet, cfg.Spec.DiscoveryURL, nil)
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, cfg.Spec.DiscoveryURL, nil)
 		if err != nil {
 			return fmt.Errorf("failed to create http request for discovery endpoint: %v", err)
 		}
-		resp, err := http.DefaultClient.Do(request)
+		resp, err := telemetry.HTTPClient().Do(request)
 		if err != nil {
 			return fmt.Errorf("failed to send discovery request: %v", err)
 		}

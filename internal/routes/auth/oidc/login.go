@@ -76,7 +76,14 @@ func (r *loginRoute) Handler() http.HandlerFunc {
 			return
 		}
 
-		cfg, err := getConfig(r.rc, name)
+		// Bridge the inbound request span (req.Context()) with the long-lived
+		// values (accessToken/username/snowplowURL) carried by r.ctx so the
+		// outbound OIDC-discovery / token / userinfo / snowplow hops are both
+		// traced and authenticated. With tracing OFF this just returns
+		// req.Context() with the same values copied — behaviourally identical.
+		callCtx := restaction.MergeRequestContext(req.Context(), r.ctx)
+
+		cfg, err := getConfig(callCtx, r.rc, name)
 		if err != nil {
 			log.Err(err).Str("name", name).Msg("unable to fetch oidc configuration")
 			encode.ExpectationFailed(wri, err)
@@ -84,7 +91,7 @@ func (r *loginRoute) Handler() http.HandlerFunc {
 		}
 
 		log.Debug().Str("name", name).Msg("starting oidc login")
-		idToken, err := doLogin(req.Header.Get(authCodeKey), cfg)
+		idToken, err := doLogin(callCtx, req.Header.Get(authCodeKey), cfg)
 		if err != nil {
 			log.Err(err).Str("name", name).Msg("unable to complete login")
 			encode.InternalError(wri, err)
@@ -93,14 +100,14 @@ func (r *loginRoute) Handler() http.HandlerFunc {
 
 		log.Debug().Str("name", name).Msg("resolving restaction")
 		if cfg.RESTActionRef != nil {
-			additionalFieldstoReplace, err := restaction.Resolve(r.ctx, r.rc, cfg.RESTActionRef, idToken.email, idToken.bearerToken)
+			additionalFieldstoReplace, err := restaction.Resolve(callCtx, r.rc, cfg.RESTActionRef, idToken.email, idToken.bearerToken)
 			ok, errr := checkKeys(additionalFieldstoReplace)
 			if err != nil || !ok || errr != nil {
 				if errr != nil {
 					log.Err(err).Str("name", name).Msgf("restaction parsing has found the following error: %v", errr)
 				}
 				log.Err(err).Str("name", name).Msg("unable to resolve restaction, retrying with legacy resolve (copy)")
-				additionalFieldstoReplace, err = restaction.LegacyResolve(r.ctx, r.rc, cfg.RESTActionRef, idToken.email, idToken.bearerToken)
+				additionalFieldstoReplace, err = restaction.LegacyResolve(callCtx, r.rc, cfg.RESTActionRef, idToken.email, idToken.bearerToken)
 				if err != nil {
 					log.Err(err).Str("name", name).Msg("unable to resolve restaction, stopping")
 					encode.InternalError(wri, err)

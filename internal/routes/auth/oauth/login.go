@@ -15,8 +15,10 @@ import (
 	"github.com/krateoplatformops/authn/internal/helpers/userinfo"
 	"github.com/krateoplatformops/authn/internal/routes"
 	"github.com/krateoplatformops/authn/internal/shortid"
+	"github.com/krateoplatformops/authn/internal/telemetry"
 	"github.com/krateoplatformops/plumbing/kubeutil"
 	"github.com/rs/zerolog"
+	"golang.org/x/oauth2"
 	"k8s.io/client-go/rest"
 )
 
@@ -91,8 +93,17 @@ func (r *loginRoute) Handler() http.HandlerFunc {
 			return
 		}
 
-		// use code to get token.
-		tok, err := oc.Exchange(context.Background(), code)
+		// Bridge the inbound request span (req.Context()) with the long-lived
+		// values (accessToken/username/snowplowURL) carried by r.ctx so the
+		// outbound snowplow hop is both traced and authenticated. With tracing
+		// OFF this is behaviourally identical to using req.Context().
+		callCtx := restaction.MergeRequestContext(req.Context(), r.ctx)
+
+		// use code to get token. Use the request-scoped context (not a fresh
+		// Background) so the token-exchange hop is traced and cancelled with the
+		// inbound request; inject the instrumented HTTP client when tracing is on.
+		exchangeCtx := context.WithValue(callCtx, oauth2.HTTPClient, telemetry.HTTPClient())
+		tok, err := oc.Exchange(exchangeCtx, code)
 		if err != nil {
 			log.Err(err).Msg("unable to auth code for token")
 			encode.ExpectationFailed(wri, err)
@@ -108,12 +119,12 @@ func (r *loginRoute) Handler() http.HandlerFunc {
 				encode.InternalError(wri, err)
 				return
 			}
-			additionalFieldstoReplace, err := restaction.Resolve(r.ctx, r.rc, restactionRef, uuid.New().String(), tok.AccessToken)
+			additionalFieldstoReplace, err := restaction.Resolve(callCtx, r.rc, restactionRef, uuid.New().String(), tok.AccessToken)
 			value, ok := additionalFieldstoReplace["name"]
 			_, okk := additionalFieldstoReplace["name"].(string)
 			if err != nil || !ok || !okk || value == nil {
 				log.Err(err).Str("name", name).Msg("unable to resolve restaction, retrying with legacy resolve (copy)")
-				additionalFieldstoReplace, err = restaction.LegacyResolve(r.ctx, r.rc, restactionRef, uuid.New().String(), tok.AccessToken)
+				additionalFieldstoReplace, err = restaction.LegacyResolve(callCtx, r.rc, restactionRef, uuid.New().String(), tok.AccessToken)
 				if err != nil {
 					log.Err(err).Str("name", name).Msg("unable to resolve restaction, stopping")
 					encode.InternalError(wri, err)

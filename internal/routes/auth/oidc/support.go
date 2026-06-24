@@ -13,6 +13,7 @@ import (
 	"github.com/krateoplatformops/authn/apis/core"
 	"github.com/krateoplatformops/authn/internal/helpers/kube/resolvers"
 	"github.com/krateoplatformops/authn/internal/helpers/kube/secrets"
+	"github.com/krateoplatformops/authn/internal/telemetry"
 	"k8s.io/client-go/rest"
 )
 
@@ -45,8 +46,8 @@ type idToken struct {
 	avatarURL         string
 }
 
-func getConfig(rc *rest.Config, name string) (*oidcConfig, error) {
-	cfg, err := resolvers.OIDCConfigGet(rc, name)
+func getConfig(ctx context.Context, rc *rest.Config, name string) (*oidcConfig, error) {
+	cfg, err := resolvers.OIDCConfigGet(ctx, rc, name)
 	if err != nil {
 		return &oidcConfig{}, fmt.Errorf("unable to resolve OIDC configuration")
 	}
@@ -75,7 +76,7 @@ func getConfig(rc *rest.Config, name string) (*oidcConfig, error) {
 	return res, nil
 }
 
-func doLogin(code string, cfg *oidcConfig) (idToken, error) {
+func doLogin(ctx context.Context, code string, cfg *oidcConfig) (idToken, error) {
 	data := url.Values{}
 	data.Set("client_id", cfg.ClientID)
 	data.Set("client_secret", cfg.ClientSecret)
@@ -83,7 +84,14 @@ func doLogin(code string, cfg *oidcConfig) (idToken, error) {
 	data.Set("redirect_uri", cfg.RedirectURI)
 	data.Set("grant_type", "authorization_code")
 
-	resp, err := http.PostForm(cfg.TokenURL, data)
+	tokenReq, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.TokenURL,
+		strings.NewReader(data.Encode()))
+	if err != nil {
+		return idToken{}, fmt.Errorf("failed to create request to token endpoint: %v", err)
+	}
+	tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := telemetry.HTTPClient().Do(tokenReq)
 	if err != nil {
 		return idToken{}, fmt.Errorf("failed to send request to token endpoint: %v", err)
 	}
@@ -149,12 +157,12 @@ func doLogin(code string, cfg *oidcConfig) (idToken, error) {
 
 	if callUserInfo && cfg.UserInfoURL != "" {
 		if token.AccessToken != "" {
-			request, err := http.NewRequest(http.MethodGet, cfg.UserInfoURL, nil)
+			request, err := http.NewRequestWithContext(ctx, http.MethodGet, cfg.UserInfoURL, nil)
 			if err != nil {
 				return idToken{}, fmt.Errorf("failed to create http request for userinfo endpoint: %v", err)
 			}
 			request.Header.Set("Authorization", "Bearer "+token.AccessToken)
-			resp, err := http.DefaultClient.Do(request)
+			resp, err := telemetry.HTTPClient().Do(request)
 			if err != nil {
 				return idToken{}, fmt.Errorf("failed to send userinfo request: %v", err)
 			}

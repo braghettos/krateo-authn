@@ -25,10 +25,12 @@ import (
 	"github.com/krateoplatformops/authn/internal/routes/auth/serviceaccount"
 	"github.com/krateoplatformops/authn/internal/routes/auth/strategies"
 	"github.com/krateoplatformops/authn/internal/routes/health"
+	"github.com/krateoplatformops/authn/internal/telemetry"
 	xcontext "github.com/krateoplatformops/plumbing/context"
 	"github.com/krateoplatformops/plumbing/jwtutil"
 	"github.com/krateoplatformops/plumbing/signup"
 	"github.com/rs/zerolog"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 )
@@ -48,6 +50,8 @@ func main() {
 	debugOn := flag.Bool("debug", env.Bool("AUTHN_DEBUG", false), "dump verbose output")
 	dumpEnv := flag.Bool("dump-env", env.Bool("AUTHN_DUMP_ENV", false), "dump environment variables")
 	corsOn := flag.Bool("cors", env.Bool("AUTHN_CORS", true), "enable or disable CORS")
+	otelTracingOn := flag.Bool("otel-tracing", env.Bool("OTEL_TRACING_ENABLED", false),
+		"enable OpenTelemetry tracing (OTLP/HTTP); default off")
 	servicePort := flag.Int("port", env.Int("AUTHN_PORT", 8082), "port to listen on")
 	certExpiresIn := flag.Duration("cert-expires",
 		env.Duration("AUTHN_KUBECONFIG_CRT_EXPIRES_IN", time.Hour*24), "generated certificate duration (default: 24h)")
@@ -121,9 +125,26 @@ func main() {
 	log.Debug().Msgf("Snowplow URL from Service ENV: %s", temp)
 	log.Debug().Msgf("Snowplow URL computed/from parameter: %s", *snowplowURL)
 
+	// OpenTelemetry (default OFF). The --otel-tracing flag (default
+	// OTEL_TRACING_ENABLED) is the single source of truth for the tracing
+	// pipeline, so make sure the env the telemetry package reads agrees with the
+	// resolved flag value (the flag may have been set explicitly on the CLI).
+	if *otelTracingOn {
+		os.Setenv(telemetry.EnvTracingEnabled, "true")
+	}
+	otelShutdown, err := telemetry.Setup(context.Background(), serviceName, Version)
+	if err != nil {
+		log.Fatal().Err(err).Msg("initializing OpenTelemetry")
+	}
+	if telemetry.TracingEnabled() || telemetry.MetricsEnabled() {
+		log.Info().
+			Bool("tracing", telemetry.TracingEnabled()).
+			Bool("metrics", telemetry.MetricsEnabled()).
+			Msg("OpenTelemetry enabled")
+	}
+
 	// Kubernetes configuration
 	var cfg *rest.Config
-	var err error
 	if len(*kconfig) > 0 {
 		cfg, err = clientcmd.BuildConfigFromFlags("", *kconfig)
 	} else {
@@ -208,12 +229,35 @@ func main() {
 			JwtSingKey:          *signKey,
 		}))
 
-	handler := routes.Serve(all, log)
+	var handler http.Handler = routes.Serve(all, log)
+
+	// OpenTelemetry HTTP server instrumentation (gated, default OFF). When
+	// metrics are opted in, emit http.server.* instruments; when tracing is
+	// opted in, wrap with otelhttp so each inbound request becomes a server
+	// span (named by URL path) and traceparent is extracted. /health is
+	// filtered out of tracing to avoid probe noise. When both are off, the
+	// handler chain is left untouched (byte-identical off-path).
+	if telemetry.MetricsEnabled() {
+		handler = telemetry.MetricsMiddleware(handler)
+	}
+	if telemetry.TracingEnabled() {
+		handler = otelhttp.NewHandler(handler, serviceName,
+			otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
+				return r.URL.Path
+			}),
+			otelhttp.WithFilter(func(r *http.Request) bool {
+				return r.URL.Path != health.Path
+			}),
+		)
+	}
+
 	if *corsOn {
 		c := cors.New(cors.Options{
-			AllowedOrigins:   []string{"*"},
-			AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-			AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-Auth-Code"},
+			AllowedOrigins: []string{"*"},
+			AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+			// traceparent/tracestate/baggage are REQUIRED so the cross-origin
+			// browser->authn hop can carry W3C trace context to authn.
+			AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-Auth-Code", "traceparent", "tracestate", "baggage"},
 			ExposedHeaders:   []string{"Link"},
 			AllowCredentials: true,
 			MaxAge:           300, // Maximum value not ignored by any of major browsers
@@ -269,6 +313,11 @@ func main() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+
+	// Flush and release OpenTelemetry providers (no-op when telemetry is off).
+	if err := otelShutdown(ctx); err != nil {
+		log.Err(err).Msg("error shutting down OpenTelemetry")
+	}
 
 	server.SetKeepAlivesEnabled(false)
 	if err := server.Shutdown(ctx); err != nil {

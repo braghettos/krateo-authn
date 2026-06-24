@@ -8,6 +8,10 @@ import (
 	"github.com/krateoplatformops/authn/internal/routes"
 )
 
+// Path is the health probe route. Exported so instrumentation (e.g. OTel
+// tracing filters) can exclude it from probe noise.
+const Path = "/health"
+
 func Check(healthy *int32, version string, serviceName string) routes.Route {
 	return &healthRoute{
 		healthy:     healthy,
@@ -29,7 +33,7 @@ func (r *healthRoute) Name() string {
 }
 
 func (r *healthRoute) Pattern() string {
-	return "/health"
+	return Path
 }
 
 func (r *healthRoute) Method() string {

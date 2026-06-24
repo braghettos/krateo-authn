@@ -1,6 +1,7 @@
 package oidc
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -145,7 +146,7 @@ func TestDoLogin(t *testing.T) {
 			}
 
 			// FuT
-			resultToken, err := doLogin("test-code", cfg)
+			resultToken, err := doLogin(context.Background(), "test-code", cfg)
 			if err != nil {
 				t.Fatalf("doLogin failed: %v", err)
 			}
