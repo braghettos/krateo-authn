@@ -9,6 +9,7 @@ import (
 
 	"github.com/krateoplatformops/authn/apis/core"
 	"github.com/krateoplatformops/authn/internal/helpers/kube/secrets"
+	"github.com/krateoplatformops/authn/internal/telemetry"
 	xcontext "github.com/krateoplatformops/plumbing/context"
 	"github.com/krateoplatformops/plumbing/kubeutil"
 	templatesv1 "github.com/krateoplatformops/snowplow/apis/templates/v1"
@@ -32,7 +33,7 @@ func Resolve(ctx context.Context, rc *rest.Config, restaction *core.ObjectRef, e
 		restaction.Name,
 		restaction.Namespace,
 		jsonToken)
-	request, err := http.NewRequest(http.MethodGet, url, nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create http request for restaction call to snowplow: %w", err)
 	}
@@ -43,7 +44,7 @@ func Resolve(ctx context.Context, rc *rest.Config, restaction *core.ObjectRef, e
 	}
 	request.Header.Set("Authorization", fmt.Sprintf("Bearer %s", jwt))
 
-	resp, err := http.DefaultClient.Do(request)
+	resp, err := telemetry.HTTPClient().Do(request)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send http request for restaction call to snowplow: %w", err)
 	}
@@ -75,7 +76,7 @@ func LegacyResolve(ctx context.Context, rc *rest.Config, restaction *core.Object
 		"/call?apiVersion=templates.krateo.io%%2Fv1&resource=restactions&name=%s&namespace=%s",
 		restactionCopy.Name,
 		restactionCopy.Namespace)
-	request, err := http.NewRequest(http.MethodGet, url, nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create http request for restaction call to snowplow: %w", err)
 	}
@@ -86,7 +87,7 @@ func LegacyResolve(ctx context.Context, rc *rest.Config, restaction *core.Object
 	}
 	request.Header.Set("Authorization", fmt.Sprintf("Bearer %s", jwt))
 
-	resp, err := http.DefaultClient.Do(request)
+	resp, err := telemetry.HTTPClient().Do(request)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send http request for restaction call to snowplow: %w", err)
 	}
