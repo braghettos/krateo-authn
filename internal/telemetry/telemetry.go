@@ -2,9 +2,11 @@
 // service.
 //
 // Everything in this package is GATED behind explicit, default-OFF opt-in env
-// vars (OTEL_TRACING_ENABLED / OTEL_METRICS_ENABLED). When both are off, Setup
-// is a complete no-op: no exporter is created, no provider is registered with
-// the global otel package, and no propagator is installed. The off-path is
+// vars. OTEL_ENABLED is the master gate (default false); OTEL_TRACING_ENABLED
+// and OTEL_METRICS_ENABLED each default to OTEL_ENABLED when unset, and still
+// override it when set explicitly. When both signals resolve to off, Setup is a
+// complete no-op: no exporter is created, no provider is registered with the
+// global otel package, and no propagator is installed. The off-path is
 // therefore byte-identical to the pre-instrumentation behaviour (the default
 // http.DefaultClient / http.DefaultTransport stay untouched, and
 // otel.GetTextMapPropagator() keeps returning the no-op propagator).
@@ -28,9 +30,13 @@ import (
 )
 
 const (
-	// EnvTracingEnabled gates the tracing pipeline. Default: false.
+	// EnvEnabled is the master OTel gate. Default: false. When set it becomes
+	// the default for EnvTracingEnabled and EnvMetricsEnabled (each of which
+	// still overrides it when set explicitly).
+	EnvEnabled = "OTEL_ENABLED"
+	// EnvTracingEnabled gates the tracing pipeline. Default: OTEL_ENABLED.
 	EnvTracingEnabled = "OTEL_TRACING_ENABLED"
-	// EnvMetricsEnabled gates the metrics pipeline. Default: false.
+	// EnvMetricsEnabled gates the metrics pipeline. Default: OTEL_ENABLED.
 	EnvMetricsEnabled = "OTEL_METRICS_ENABLED"
 	// EnvOTLPEndpoint is the standard OTLP/HTTP collector endpoint
 	// (e.g. "otel-collector.krateo-system.svc.cluster.local:4318").
@@ -38,18 +44,25 @@ const (
 	EnvOTLPEndpoint = "OTEL_EXPORTER_OTLP_ENDPOINT"
 )
 
+// Enabled reports the master OTel gate (OTEL_ENABLED). Default: false.
+func Enabled() bool {
+	return env.Bool(EnvEnabled, false)
+}
+
 // ShutdownFunc flushes and releases any telemetry providers created by Setup.
 // It is always safe to call (no-op when nothing was registered).
 type ShutdownFunc func(context.Context) error
 
-// TracingEnabled reports whether the tracing pipeline is opted in.
+// TracingEnabled reports whether the tracing pipeline is opted in. It defaults
+// to the master OTEL_ENABLED gate when OTEL_TRACING_ENABLED is unset.
 func TracingEnabled() bool {
-	return env.Bool(EnvTracingEnabled, false)
+	return env.Bool(EnvTracingEnabled, Enabled())
 }
 
-// MetricsEnabled reports whether the metrics pipeline is opted in.
+// MetricsEnabled reports whether the metrics pipeline is opted in. It defaults
+// to the master OTEL_ENABLED gate when OTEL_METRICS_ENABLED is unset.
 func MetricsEnabled() bool {
-	return env.Bool(EnvMetricsEnabled, false)
+	return env.Bool(EnvMetricsEnabled, Enabled())
 }
 
 // Setup conditionally initialises the OpenTelemetry tracing and/or metrics
