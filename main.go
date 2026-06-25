@@ -50,8 +50,8 @@ func main() {
 	debugOn := flag.Bool("debug", env.Bool("AUTHN_DEBUG", false), "dump verbose output")
 	dumpEnv := flag.Bool("dump-env", env.Bool("AUTHN_DUMP_ENV", false), "dump environment variables")
 	corsOn := flag.Bool("cors", env.Bool("AUTHN_CORS", true), "enable or disable CORS")
-	otelTracingOn := flag.Bool("otel-tracing", env.Bool("OTEL_TRACING_ENABLED", false),
-		"enable OpenTelemetry tracing (OTLP/HTTP); default off")
+	otelTracingOn := flag.Bool("otel-tracing", telemetry.TracingEnabled(),
+		"enable OpenTelemetry tracing (OTLP/HTTP); defaults to OTEL_TRACING_ENABLED, which defaults to OTEL_ENABLED; default off")
 	servicePort := flag.Int("port", env.Int("AUTHN_PORT", 8082), "port to listen on")
 	certExpiresIn := flag.Duration("cert-expires",
 		env.Duration("AUTHN_KUBECONFIG_CRT_EXPIRES_IN", time.Hour*24), "generated certificate duration (default: 24h)")
@@ -125,10 +125,13 @@ func main() {
 	log.Debug().Msgf("Snowplow URL from Service ENV: %s", temp)
 	log.Debug().Msgf("Snowplow URL computed/from parameter: %s", *snowplowURL)
 
-	// OpenTelemetry (default OFF). The --otel-tracing flag (default
-	// OTEL_TRACING_ENABLED) is the single source of truth for the tracing
-	// pipeline, so make sure the env the telemetry package reads agrees with the
-	// resolved flag value (the flag may have been set explicitly on the CLI).
+	// OpenTelemetry (default OFF). The master gate is OTEL_ENABLED; tracing and
+	// metrics each default to it and can be overridden per-signal via
+	// OTEL_TRACING_ENABLED / OTEL_METRICS_ENABLED. The --otel-tracing flag
+	// (default OTEL_TRACING_ENABLED, which itself defaults to OTEL_ENABLED)
+	// continues to drive the tracing pipeline: when it resolves true, reflect
+	// that into the env the telemetry package reads (the flag may have been set
+	// explicitly on the CLI).
 	if *otelTracingOn {
 		os.Setenv(telemetry.EnvTracingEnabled, "true")
 	}
